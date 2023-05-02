@@ -1,0 +1,3 @@
+(library
+ (name yirgacheffe)
+ (libraries eio tiff))

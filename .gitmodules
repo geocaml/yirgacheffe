@@ -1,0 +1,3 @@
+[submodule "ocaml-tiff"]
+	path = ocaml-tiff
+	url = https://github.com/geocaml/ocaml-tiff
