@@ -52,7 +52,7 @@ end
 
 module UniformArea = struct
   type t = {
-    tiff : Tiff.t;
+    tiff : Eio.File.ro Tiff.t;
     interest : Area.t option;
 
     projection : string;
@@ -83,7 +83,7 @@ module UniformArea = struct
       ~ysize:height
 
   let of_file path =
-    let tiff = Tiff.of_file path in
+    let tiff = Tiff.from_file path in
     let ifd = Tiff.ifd tiff in
     assert (Tiff.Ifd.width ifd = 1);
     let height = Tiff.Ifd.height ifd in
