@@ -15,6 +15,14 @@
 
 (** {2 Core Primitives} *)
 
+val wsg_84_projection : string
+
+module Math : sig
+
+  val round_up_pixels : scale:float -> float -> int
+  (** The pixel value from a given value and pixel scale. *)
+end
+
 module PixelScale : sig
   type t
   (** A pixel scale *)
@@ -28,13 +36,19 @@ module PixelScale : sig
   val create : x:float -> y:float -> t
   (** [create ~x ~y] makes a new pixel scale value from the [x]
       and [y] values. *)
+
+  val pp : t Fmt.t
 end
 
 module Area : sig
-  type t
+  type t = private { left : float; right : float; top : float; bottom : float }
   (** A geometry with a top, bottom, left and right value. *)
 
   val create : left:float -> top:float -> right:float -> bottom:float -> t
+
+  val equal : t -> t -> bool
+
+  val pp : t Fmt.t
 end
 
 module Window : sig
@@ -48,8 +62,6 @@ end
 module type Low_layer = sig
     type t
 
-    val of_file : Eio.File.ro -> t
-
     val area : t -> Area.t
 
     val pixel_scale : t -> PixelScale.t
@@ -59,7 +71,17 @@ module type Low_layer = sig
     val set_area_of_interest : t -> Area.t -> t
 end
 
-module UniformArea : Low_layer
+module UniformArea : sig
+  include Low_layer
+
+  val of_file : Eio.File.ro -> t
+end
+
+module Raster : sig
+  include Low_layer
+
+  val of_dataset : Gdal.Dataset.t -> t
+end
 
 module Layer : sig
   type t

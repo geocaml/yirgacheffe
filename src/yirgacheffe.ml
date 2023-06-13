@@ -1,5 +1,21 @@
+let wsg_84_projection = {|GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],AXIS["Latitude",NORTH],AXIS["Longitude",EAST],AUTHORITY["EPSG","4326"]]|}
+
+module Math = struct
+  let minimal_degree_of_interest = 1.0
+
+  let round_up_pixels ~scale v =
+    let floored = floor v in
+    let diff = v -. floored in
+    let degrees_diff = diff *. scale in
+    if degrees_diff < minimal_degree_of_interest
+    then int_of_float floored
+    else int_of_float @@ ceil v
+end
+
 module PixelScale = struct
   type t = { x : float; y : float }
+
+  let pp ppf v = Fmt.(list ~sep:Fmt.comma float) ppf [ v.x; v.y ]
 
   let x t = t.x
   let y t = t.y
@@ -10,16 +26,20 @@ end
 module Area = struct
   type t = {
     left : float;
+    right : float;
     top : float;
     bottom : float;
-    right : float;
   }
 
-  let create ~left ~top ~right ~bottom =
-    if left >= right || bottom >= top then
-      invalid_arg "Invalid Area Dimensions"
-    else
-      { left; top; right; bottom }
+  let equal a b =
+    Float.equal a.left b.left &&
+    Float.equal a.right b.right &&
+    Float.equal a.top b.top &&
+    Float.equal a.bottom b.bottom
+
+  let pp ppf v = Fmt.(list float) ppf [ v.left; v.right; v.top; v.bottom ]
+
+  let create ~left ~top ~right ~bottom = { left; top; right; bottom }
 end
 
 module Window = struct
@@ -36,8 +56,6 @@ end
 
 module type Low_layer = sig
   type t
-
-  val of_file : Eio.File.ro -> t
 
   val area : t -> Area.t
 
@@ -125,6 +143,85 @@ module UniformArea = struct
     }
 end
 
+module Raster = struct
+  type t = {
+    dataset : Gdal.Dataset.t;
+    transform : (float, Bigarray.float64_elt, Bigarray.c_layout) Bigarray.Array1.t;
+    raster_x_size : int;
+    raster_y_size : int;
+    interest : Area.t option;
+    area : Area.t;
+    window : Window.t;
+  }
+
+  let ( >>= ) f v = Result.bind f v
+
+  let gdal_error = function
+    | Ok v -> Ok v
+    | Error e -> Error (Gdal.Error.to_msg e)
+
+  let of_dataset dataset =
+    let transform = Gdal.Dataset.geo_transform dataset |> Result.get_ok in
+    let raster_x_size = Gdal.Dataset.raster_x_size dataset in
+    let raster_y_size = Gdal.Dataset.raster_y_size dataset in
+    let area =
+      Area.create
+        ~left:(Bigarray.Array1.get transform 0)
+        ~top:(Bigarray.Array1.get transform 3)
+        ~right:(Bigarray.Array1.get transform 0 +. (float_of_int raster_x_size *. Bigarray.Array1.get transform 1))
+        ~bottom:(Bigarray.Array1.get transform 3 +. (float_of_int raster_y_size *. Bigarray.Array1.get transform 5))
+    in
+    let window =
+      Window.create
+       ~xoff:0
+       ~yoff:0
+       ~xsize:raster_x_size
+       ~ysize:raster_y_size
+    in
+    {
+      dataset;
+      transform;
+      raster_x_size;
+      raster_y_size;
+      interest = None;
+      area;
+      window;
+    }
+
+
+  let _empty ?file ~sw ~projection (area : Area.t) (scale : PixelScale.t) (datatype : Gdal.Datatype.t) =
+    let abs_xstep, abs_ystep =
+      abs_float scale.x, abs_float scale.y
+    in
+    let pixel_friendly_area =
+      Area.create
+        ~left:(floor(area.left /. abs_xstep) *. abs_xstep)
+        ~right:(floor(area.right /. abs_xstep) *. abs_xstep)
+        ~top:(floor(area.top /. abs_ystep) *. abs_ystep)
+        ~bottom:(floor(area.bottom /. abs_ystep) *. abs_ystep)
+    in
+    let driver, filename =
+      match file with
+      | None -> Gdal.Driver.get_by_name "mem", ""
+      | Some name -> Gdal.Driver.get_by_name "GTiff", name
+    in
+    driver >>= fun driver ->
+    let xsize = Math.round_up_pixels ~scale:abs_xstep (pixel_friendly_area.right -. pixel_friendly_area.left) in
+    let ysize = Math.round_up_pixels ~scale:abs_ystep (pixel_friendly_area.top -. pixel_friendly_area.bottom) in
+    let dataset = Gdal.Driver.create ~sw ~filename ~xsize ~ysize ~bands:1 ~typ:datatype driver in
+    Gdal.Dataset.set_geo_transform dataset [pixel_friendly_area.left; scale.x; 0.0; pixel_friendly_area.top; 0.0; scale.y] |> gdal_error >>= fun () ->
+    Gdal.Dataset.set_projection dataset projection |> gdal_error
+
+  let pixel_scale t =
+    PixelScale.create ~x:(Bigarray.Array1.get t.transform 1) ~y:(Bigarray.Array1.get t.transform 5)
+
+  let set_area_of_interest t a = { t with interest = Some a }
+
+  let area t = t.area
+
+  let window t = t.window
+end
+
 
 (* Generic Layers *)
 module Layer = struct
@@ -152,6 +249,8 @@ let calculate_intersection (layers : Layer.t list) = match layers with
     let scale = Layer.pixel_scale first in
     let same_scale l2 =
       let p2 = Layer.pixel_scale l2 in
+      Fmt.pr "P1: %a\n" PixelScale.pp scale;
+      Fmt.pr "P2: %a\n" PixelScale.pp p2;
       almost_equal scale.x p2.x && almost_equal scale.y p2.y
     in
     let are_layers_same_scale = List.for_all same_scale layers in
